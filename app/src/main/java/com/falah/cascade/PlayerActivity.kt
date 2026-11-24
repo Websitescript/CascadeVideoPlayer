@@ -152,6 +152,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.SubtitleView
@@ -294,19 +295,33 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
     var fb by remember { mutableStateOf<Triple<Boolean, Int, Int>?>(null) }
     var lastFb by remember { mutableStateOf<Triple<Boolean, Int, Int>?>(null) }
     var swipeTarget by remember { mutableStateOf<Long?>(null) }
-    var gauge by remember { mutableStateOf<Pair<Boolean, Float>?>(null) }
-    var lastGauge by remember { mutableFloatStateOf(0f) }
+    var gauge by remember { mutableStateOf<Triple<Boolean, Float, Int>?>(null) } // brightness?, fill 0..1, percent
+    var lastGauge by remember { mutableStateOf(Triple(true, 0f, 0)) }
+    var holdSpeed by remember { mutableFloatStateOf(prefs.holdSpeed) }
     var boost by remember { mutableStateOf(false) }
     var prevSpeed by remember { mutableFloatStateOf(1f) }
     val textureRef = remember { mutableStateOf<TextureView?>(null) }
 
     val am = remember { ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val maxVol = remember { am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
-    var vol by remember { mutableFloatStateOf(am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+    val sysPct0 = remember { am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100f / maxVol }
+    var volPct by remember { mutableFloatStateOf(if (sysPct0 >= 99.5f) 100f + prefs.boost else sysPct0) } // 0..200
+    var sentBoostMb by remember { mutableIntStateOf(-1) }
     var brightness by remember {
         val b = act.window.attributes.screenBrightness
         mutableFloatStateOf(if (b < 0f) 0.5f else b)
     }
+
+    fun applyBoost(pct: Float) {
+        val extra = (pct - 100f).coerceIn(0f, 100f)
+        val mb = if (extra <= 0f) 0 else (2000.0 * kotlin.math.log10(1.0 + extra / 100.0)).roundToInt()
+        if (mb != sentBoostMb) {
+            sentBoostMb = mb
+            prefs.boost = extra.roundToInt()
+            c.sendCustomCommand(SessionCommand("cascade.boost", Bundle.EMPTY), Bundle().apply { putInt("mb", mb) })
+        }
+    }
+    LaunchedEffect(Unit) { applyBoost(volPct) }
 
     // ---- clock + battery ----
     var clock by remember { mutableStateOf("") }
@@ -374,12 +389,20 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
 
     // ---- load what we were asked to play ----
     LaunchedEffect(intent) {
-        val data = intent?.data
+        val it0 = intent
+        val streams: List<Uri> = when {
+            it0?.data != null -> listOf(it0!!.data!!)
+            it0?.action == Intent.ACTION_SEND_MULTIPLE -> it0!!.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+            it0?.action == Intent.ACTION_SEND -> listOfNotNull(it0!!.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+            else -> emptyList()
+        }
         val list: List<Media>
         var start = 0
-        if (data != null) {
-            val type = ctx.contentResolver.getType(data) ?: ""
-            list = listOf(Media(0, data, displayName(ctx, data), 0, 0, type.startsWith("audio") || isAudioExt(data.toString()), 0))
+        if (streams.isNotEmpty()) {
+            list = streams.map { u ->
+                val type = ctx.contentResolver.getType(u) ?: ""
+                Media(0, u, displayName(ctx, u), 0, 0, type.startsWith("audio") || isAudioExt(u.toString()), 0)
+            }
         } else if (Queue.items.isNotEmpty()) {
             list = Queue.items
             start = Queue.index.coerceIn(0, Queue.items.lastIndex)
@@ -433,7 +456,7 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
         if (showControls && isPlaying && dialog.isEmpty()) { delay(3500); showControls = false }
     }
     LaunchedEffect(fb) { val cur = fb; if (cur != null) { lastFb = cur; delay(800); fb = null } }
-    LaunchedEffect(gauge) { val g = gauge; if (g != null) { lastGauge = g.second; delay(900); gauge = null } }
+    LaunchedEffect(gauge) { val g = gauge; if (g != null) { lastGauge = g; delay(900); gauge = null } }
     LaunchedEffect(dialog) { if (dialog.isNotEmpty()) lastDialog = dialog }
     LaunchedEffect(sleepMin) { if (sleepMin > 0) { delay(sleepMin * 60_000L); c.pause(); sleepMin = 0 } }
 
@@ -488,6 +511,12 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
     BackHandler(enabled = dialog.isNotEmpty()) { dialog = "" }
 
     val isAudioItem = remember(title, itemCount) { c.currentMediaItem?.mediaMetadata?.extras?.getBoolean("audio") == true }
+    fun toggleVideo() {
+        if (isAudioItem) { Toast.makeText(ctx, "This is an audio file", Toast.LENGTH_SHORT).show(); return }
+        userAudio = !userAudio
+        act.audioMode.value = userAudio
+        Toast.makeText(ctx, if (userAudio) "Audio only" else "Video on", Toast.LENGTH_SHORT).show()
+    }
     val showUi = (showControls || audioMode) && !locked
     val shownDialog = if (dialog.isNotEmpty()) dialog else lastDialog
     val subLine = buildString {
@@ -545,9 +574,14 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                         detectTapGestures(
                             onPress = { tryAwaitRelease(); if (boost) { boost = false; c.setPlaybackSpeed(prevSpeed) } },
                             onLongPress = {
-                                if (!locked && c.isPlaying) { prevSpeed = c.playbackParameters.speed; boost = true; c.setPlaybackSpeed(2f) }
+                                if (!locked && c.isPlaying) { prevSpeed = c.playbackParameters.speed; boost = true; c.setPlaybackSpeed(holdSpeed) }
                             },
-                            onDoubleTap = { o -> if (!locked && !audioMode) doubleTap(o.x > size.width / 2) },
+                            onDoubleTap = { o ->
+                                if (!locked) {
+                                    val fx = o.x / size.width
+                                    if (fx < 0.33f) doubleTap(false) else if (fx > 0.67f) doubleTap(true) else toggleVideo()
+                                }
+                            },
                             onTap = { showControls = !showControls; interaction++ },
                         )
                     }
@@ -576,11 +610,13 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                                     val lp = act.window.attributes
                                     lp.screenBrightness = brightness
                                     act.window.attributes = lp
-                                    gauge = true to brightness
+                                    gauge = Triple(true, brightness, (brightness * 100).roundToInt())
                                 } else {
-                                    vol = (vol + delta * maxVol).coerceIn(0f, maxVol.toFloat())
-                                    am.setStreamVolume(AudioManager.STREAM_MUSIC, vol.roundToInt(), 0)
-                                    gauge = false to vol / maxVol
+                                    volPct = (volPct + delta * 160f).coerceIn(0f, 200f)
+                                    val sys = (volPct.coerceAtMost(100f) / 100f * maxVol).roundToInt()
+                                    am.setStreamVolume(AudioManager.STREAM_MUSIC, sys, 0)
+                                    applyBoost(volPct)
+                                    gauge = Triple(false, volPct / 200f, volPct.roundToInt())
                                 }
                             },
                         )
@@ -617,17 +653,17 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
 
             // ---------------- brightness / volume gauges ----------------
             val g = gauge
-            val gLevel = g?.second ?: lastGauge
+            val gs = g ?: lastGauge
             AnimatedVisibility(
                 visible = g != null && g.first,
                 modifier = Modifier.align(Alignment.CenterStart).padding(start = 30.dp),
                 enter = fadeIn() + slideInHorizontally { -it }, exit = fadeOut(),
-            ) { GaugeBar(Icons.Filled.BrightnessMedium, gLevel) }
+            ) { GaugeBar(Icons.Filled.BrightnessMedium, gs.second, gs.third) }
             AnimatedVisibility(
                 visible = g != null && !g.first,
                 modifier = Modifier.align(Alignment.CenterEnd).padding(end = 30.dp),
                 enter = fadeIn() + slideInHorizontally { it }, exit = fadeOut(),
-            ) { GaugeBar(Icons.Filled.VolumeUp, gLevel) }
+            ) { GaugeBar(Icons.Filled.VolumeUp, gs.second, gs.third) }
 
             // ---------------- 2x boost pill ----------------
             AnimatedVisibility(
@@ -641,7 +677,7 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                 ) {
                     Icon(Icons.Filled.KeyboardDoubleArrowRight, null, tint = Brand, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("2x speed", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("${speedLabel(holdSpeed)} speed", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
 
@@ -702,41 +738,6 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                 }
             }
 
-            // ---------------- centre transport ----------------
-            AnimatedVisibility(
-                visible = showUi,
-                modifier = Modifier.align(if (audioMode) BiasAlignment(0f, 0.38f) else Alignment.Center),
-                enter = fadeIn(tween(250)) + scaleIn(spring(0.7f), initialScale = 0.8f),
-                exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.9f),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (itemCount > 1) GlassButton({ c.seekToPreviousMediaItem(); interaction++ }, size = 46.dp, fill = GlassDark, border = Edge) {
-                        Icon(Icons.Filled.SkipPrevious, "Previous", tint = Color.White)
-                    }
-                    SkipBtn(false, seekSec) { seekBy(-seekSec * 1000L); interaction++ }
-                    Box(
-                        Modifier.pressClick(0.9f) { togglePlay(); interaction++ }
-                            .shadow(22.dp, CircleShape, ambientColor = Brand, spotColor = Brand)
-                            .size(80.dp).clip(CircleShape)
-                            .background(Brush.linearGradient(listOf(BrandLight, Color(0xFFEE7E3E)))),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (buffering) CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.size(80.dp))
-                        AnimatedContent(
-                            targetState = isPlaying,
-                            transitionSpec = { (scaleIn(initialScale = 0.5f) + fadeIn()) togetherWith (scaleOut(targetScale = 0.5f) + fadeOut()) },
-                            label = "playpause",
-                        ) { p ->
-                            Icon(if (p) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play / pause", tint = Color.White, modifier = Modifier.size(42.dp))
-                        }
-                    }
-                    SkipBtn(true, seekSec) { seekBy(seekSec * 1000L); interaction++ }
-                    if (itemCount > 1) GlassButton({ c.seekToNextMediaItem(); interaction++ }, size = 46.dp, fill = GlassDark, border = Edge) {
-                        Icon(Icons.Filled.SkipNext, "Next", tint = Color.White)
-                    }
-                }
-            }
-
             // ---------------- bottom panel ----------------
             AnimatedVisibility(
                 visible = showUi,
@@ -754,27 +755,71 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                         SeekBar(pos, dur, Modifier.weight(1f)) { c.seekTo(it); interaction++ }
                         Text("-" + fmt(dur - pos), color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp, textAlign = TextAlign.End, modifier = Modifier.width(62.dp))
                     }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        PillIcon(Icons.Filled.Lock, "Lock") { locked = true; showControls = true; interaction++ }
-                        Spacer(Modifier.weight(1f))
-                        val fast = abs(speed - 1f) > 0.01f
-                        Row(
-                            Modifier.pressClick(0.94f) { dialog = "speed" }.clip(RoundedCornerShape(50))
-                                .background(if (fast) Brand.copy(alpha = 0.3f) else Color.White.copy(alpha = 0.10f))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Filled.Speed, null, tint = if (fast) Brand else Color.White, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(speedLabel(speed), color = if (fast) Brand else Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    val transport: @Composable () -> Unit = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (itemCount > 1) GlassButton({ c.seekToPreviousMediaItem(); interaction++ }, size = 40.dp, fill = GlassDark, border = Edge) {
+                                Icon(Icons.Filled.SkipPrevious, "Previous", tint = Color.White)
+                            }
+                            SkipBtn(false, seekSec, 50.dp) { seekBy(-seekSec * 1000L); interaction++ }
+                            Box(
+                                Modifier.pressClick(0.9f) { togglePlay(); interaction++ }
+                                    .shadow(14.dp, CircleShape, ambientColor = Brand, spotColor = Brand)
+                                    .size(62.dp).clip(CircleShape)
+                                    .background(Brush.linearGradient(listOf(BrandLight, Color(0xFFEE7E3E)))),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (buffering) CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.size(62.dp))
+                                AnimatedContent(
+                                    targetState = isPlaying,
+                                    transitionSpec = { (scaleIn(initialScale = 0.5f) + fadeIn()) togetherWith (scaleOut(targetScale = 0.5f) + fadeOut()) },
+                                    label = "playpause",
+                                ) { p ->
+                                    Icon(if (p) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play / pause", tint = Color.White, modifier = Modifier.size(34.dp))
+                                }
+                            }
+                            SkipBtn(true, seekSec, 50.dp) { seekBy(seekSec * 1000L); interaction++ }
+                            if (itemCount > 1) GlassButton({ c.seekToNextMediaItem(); interaction++ }, size = 40.dp, fill = GlassDark, border = Edge) {
+                                Icon(Icons.Filled.SkipNext, "Next", tint = Color.White)
+                            }
                         }
-                        PillIcon(Icons.Filled.Subtitles, "Subtitles") { dialog = "sub" }
-                        PillIcon(Icons.Filled.Audiotrack, "Audio track") { dialog = "audio" }
-                        if (!audioMode) PillIcon(Icons.Filled.AspectRatio, "Aspect ratio") {
-                            resizeMode = (resizeMode + 1) % 3
-                            Toast.makeText(ctx, listOf("Fit", "Stretch", "Zoom")[resizeMode], Toast.LENGTH_SHORT).show()
+                    }
+                    val options: @Composable () -> Unit = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val fast = abs(speed - 1f) > 0.01f
+                            Row(
+                                Modifier.pressClick(0.94f) { dialog = "speed" }.clip(RoundedCornerShape(50))
+                                    .background(if (fast) Brand.copy(alpha = 0.3f) else Color.White.copy(alpha = 0.10f))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Filled.Speed, null, tint = if (fast) Brand else Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(speedLabel(speed), color = if (fast) Brand else Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                            PillIcon(Icons.Filled.Subtitles, "Subtitles") { dialog = "sub" }
+                            PillIcon(Icons.Filled.Audiotrack, "Audio track") { dialog = "audio" }
+                            if (!audioMode) PillIcon(Icons.Filled.AspectRatio, "Aspect ratio") {
+                                resizeMode = (resizeMode + 1) % 3
+                                Toast.makeText(ctx, listOf("Fit", "Stretch", "Zoom")[resizeMode], Toast.LENGTH_SHORT).show()
+                            }
+                            PillIcon(Icons.Filled.MoreVert, "More") { dialog = "more" }
                         }
-                        PillIcon(Icons.Filled.MoreVert, "More") { dialog = "more" }
+                    }
+                    if (isPortrait) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { transport() }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            PillIcon(Icons.Filled.Lock, "Lock") { locked = true; showControls = true; interaction++ }
+                            Spacer(Modifier.weight(1f))
+                            options()
+                        }
+                    } else {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            PillIcon(Icons.Filled.Lock, "Lock") { locked = true; showControls = true; interaction++ }
+                            Spacer(Modifier.weight(1f))
+                            transport()
+                            Spacer(Modifier.weight(1f))
+                            options()
+                        }
                     }
                 }
             }
@@ -835,6 +880,10 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                             ChipRow(listOf("Off", "One", "All"), repeat) { c.repeatMode = it }
                             Label("Sleep timer")
                             ChipRow(listOf("Off", "15 min", "30 min", "45 min", "60 min"), listOf(0, 15, 30, 45, 60).indexOf(sleepMin)) { sleepMin = listOf(0, 15, 30, 45, 60)[it] }
+                            Label("Hold-to-speed (press and hold the screen)")
+                            ChipRow(listOf("1.5x", "2x", "3x", "4x"), listOf(1.5f, 2f, 3f, 4f).indexOf(holdSpeed)) {
+                                holdSpeed = listOf(1.5f, 2f, 3f, 4f)[it]; prefs.holdSpeed = holdSpeed
+                            }
                             Label("Double-tap / skip step")
                             ChipRow(listOf("5 s", "10 s", "15 s", "30 s"), listOf(5, 10, 15, 30).indexOf(seekSec)) {
                                 seekSec = listOf(5, 10, 15, 30)[it]; prefs.seekSec = seekSec
@@ -866,13 +915,13 @@ private fun PillIcon(icon: ImageVector, desc: String, tint: Color = Color.White,
 }
 
 @Composable
-private fun SkipBtn(forward: Boolean, sec: Int, onClick: () -> Unit) {
+private fun SkipBtn(forward: Boolean, sec: Int, size: androidx.compose.ui.unit.Dp = 58.dp, onClick: () -> Unit) {
     var spins by remember { mutableIntStateOf(0) }
     val rot by animateFloatAsState(spins * 360f * (if (forward) 1f else -1f), tween(450), label = "spin")
-    GlassButton({ spins++; onClick() }, size = 58.dp, fill = GlassDark, border = Edge) {
+    GlassButton({ spins++; onClick() }, size = size, fill = GlassDark, border = Edge) {
         Icon(
             Icons.Filled.Replay, null, tint = Color.White,
-            modifier = Modifier.size(34.dp).graphicsLayer { scaleX = if (forward) -1f else 1f; rotationZ = rot },
+            modifier = Modifier.size(size * 0.58f).graphicsLayer { scaleX = if (forward) -1f else 1f; rotationZ = rot },
         )
         Text("$sec", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
@@ -908,15 +957,17 @@ private fun BoxScope.SeekRipple(visible: Boolean, forward: Boolean, acc: Int, ti
 }
 
 @Composable
-private fun GaugeBar(icon: ImageVector, level: Float) {
+private fun GaugeBar(icon: ImageVector, level: Float, percent: Int) {
     val a by animateFloatAsState(level.coerceIn(0f, 1f), tween(120), label = "gauge")
+    val hot = percent > 100
     Box(
-        Modifier.width(46.dp).height(170.dp).clip(RoundedCornerShape(23.dp)).background(GlassDark).border(1.dp, Edge, RoundedCornerShape(23.dp)),
+        Modifier.width(54.dp).height(190.dp).clip(RoundedCornerShape(27.dp)).background(GlassDark).border(1.dp, Edge, RoundedCornerShape(27.dp)),
     ) {
         Box(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(a)
-                .background(Brush.verticalGradient(listOf(BrandLight, Brand))),
+                .background(Brush.verticalGradient(if (hot) listOf(Color(0xFFFF8A5B), Color(0xFFE5483B)) else listOf(BrandLight, Brand))),
         )
+        Text("$percent%", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
         Icon(icon, null, tint = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).size(20.dp))
     }
 }

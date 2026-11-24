@@ -72,6 +72,15 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("theme", 0)
         set(v) = sp.edit().putInt("theme", v).apply()
 
+    var holdSpeed: Float
+        get() = sp.getFloat("hold", 2f)
+        set(v) = sp.edit().putFloat("hold", v).apply()
+
+    /** Extra volume above 100% (0..100), applied through the audio loudness enhancer. */
+    var boost: Int
+        get() = sp.getInt("boost", 0)
+        set(v) = sp.edit().putInt("boost", v).apply()
+
     var seekSec: Int
         get() = sp.getInt("seek", 10)
         set(v) = sp.edit().putInt("seek", v).apply()

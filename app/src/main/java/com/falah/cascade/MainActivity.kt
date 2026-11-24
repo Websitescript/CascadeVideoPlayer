@@ -13,6 +13,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
@@ -71,6 +72,7 @@ import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
@@ -190,7 +192,7 @@ private fun HomeScreen(prefs: Prefs, mode: Int, onMode: (Int) -> Unit) {
         if (granted) all = withContext(Dispatchers.IO) { Library.load(ctx) }
     }
 
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(1) } // open on the Folders view
     var query by remember { mutableStateOf("") }
     var sortKey by remember { mutableIntStateOf(0) }
     var urlDialog by remember { mutableStateOf(false) }
@@ -226,7 +228,17 @@ private fun HomeScreen(prefs: Prefs, mode: Int, onMode: (Int) -> Unit) {
     fun openUri(u: Uri) {
         launchPlayer(Intent(ctx, PlayerActivity::class.java).setData(u))
     }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u -> if (u != null) openUri(u) }
+    fun openUris(us: List<Uri>) {
+        if (us.isEmpty()) return
+        Queue.items = us.map { u ->
+            val t = ctx.contentResolver.getType(u) ?: ""
+            Media(0, u, displayName(ctx, u), 0, 0, t.startsWith("audio") || isAudioExt(u.toString()), 0)
+        }
+        Queue.index = 0
+        launchPlayer(Intent(ctx, PlayerActivity::class.java))
+    }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { us -> openUris(us) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { us -> openUris(us) }
 
     // ---- hero carousel ----
     val heroItems = remember(recent, videos, query) {
@@ -267,7 +279,9 @@ private fun HomeScreen(prefs: Prefs, mode: Int, onMode: (Int) -> Unit) {
             item(span = full) {
                 Header(
                     all.count { !it.isAudio }, all.count { it.isAudio }, sortKey, { sortKey = it }, mode, onMode,
-                    { picker.launch(arrayOf("video/*", "audio/*")) }, { urlDialog = true },
+                    { picker.launch(arrayOf("video/*", "audio/*")) },
+                    { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
+                    { urlDialog = true },
                 )
             }
             item(span = full) {
@@ -442,7 +456,7 @@ private fun Header(
     videoCount: Int, audioCount: Int,
     sortKey: Int, onSort: (Int) -> Unit,
     mode: Int, onMode: (Int) -> Unit,
-    onOpenFile: () -> Unit, onOpenUrl: () -> Unit,
+    onOpenFile: () -> Unit, onOpenPhotos: () -> Unit, onOpenUrl: () -> Unit,
 ) {
     val ink = MaterialTheme.colorScheme.onBackground
     var plus by remember { mutableStateOf(false) }
@@ -460,7 +474,8 @@ private fun Header(
         Box {
             GlassButton({ plus = true }, size = 42.dp) { Icon(Icons.Filled.Add, "Open", tint = ink) }
             DropdownMenu(expanded = plus, onDismissRequest = { plus = false }) {
-                DropdownMenuItem(text = { Text("Open file") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { plus = false; onOpenFile() })
+                DropdownMenuItem(text = { Text("Open from Files") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { plus = false; onOpenFile() })
+                DropdownMenuItem(text = { Text("Pick from Photos") }, leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }, onClick = { plus = false; onOpenPhotos() })
                 DropdownMenuItem(text = { Text("Play network URL") }, leadingIcon = { Icon(Icons.Filled.Link, null) }, onClick = { plus = false; onOpenUrl() })
             }
         }
