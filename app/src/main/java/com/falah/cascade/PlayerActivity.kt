@@ -511,12 +511,6 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
     BackHandler(enabled = dialog.isNotEmpty()) { dialog = "" }
 
     val isAudioItem = remember(title, itemCount) { c.currentMediaItem?.mediaMetadata?.extras?.getBoolean("audio") == true }
-    fun toggleVideo() {
-        if (isAudioItem) { Toast.makeText(ctx, "This is an audio file", Toast.LENGTH_SHORT).show(); return }
-        userAudio = !userAudio
-        act.audioMode.value = userAudio
-        Toast.makeText(ctx, if (userAudio) "Audio only" else "Video on", Toast.LENGTH_SHORT).show()
-    }
     val showUi = (showControls || audioMode) && !locked
     val shownDialog = if (dialog.isNotEmpty()) dialog else lastDialog
     val subLine = buildString {
@@ -579,7 +573,7 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                             onDoubleTap = { o ->
                                 if (!locked) {
                                     val fx = o.x / size.width
-                                    if (fx < 0.33f) doubleTap(false) else if (fx > 0.67f) doubleTap(true) else toggleVideo()
+                                    if (fx < 0.33f) doubleTap(false) else if (fx > 0.67f) doubleTap(true) else { togglePlay(); interaction++ }
                                 }
                             },
                             onTap = { showControls = !showControls; interaction++ },
@@ -760,7 +754,6 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                             if (itemCount > 1) GlassButton({ c.seekToPreviousMediaItem(); interaction++ }, size = 40.dp, fill = GlassDark, border = Edge) {
                                 Icon(Icons.Filled.SkipPrevious, "Previous", tint = Color.White)
                             }
-                            SkipBtn(false, seekSec, 50.dp) { seekBy(-seekSec * 1000L); interaction++ }
                             Box(
                                 Modifier.pressClick(0.9f) { togglePlay(); interaction++ }
                                     .shadow(14.dp, CircleShape, ambientColor = Brand, spotColor = Brand)
@@ -777,7 +770,6 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                                     Icon(if (p) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play / pause", tint = Color.White, modifier = Modifier.size(34.dp))
                                 }
                             }
-                            SkipBtn(true, seekSec, 50.dp) { seekBy(seekSec * 1000L); interaction++ }
                             if (itemCount > 1) GlassButton({ c.seekToNextMediaItem(); interaction++ }, size = 40.dp, fill = GlassDark, border = Edge) {
                                 Icon(Icons.Filled.SkipNext, "Next", tint = Color.White)
                             }
@@ -813,12 +805,12 @@ private fun PlayerScreen(act: PlayerActivity, c: MediaController, prefs: Prefs) 
                             options()
                         }
                     } else {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            PillIcon(Icons.Filled.Lock, "Lock") { locked = true; showControls = true; interaction++ }
-                            Spacer(Modifier.weight(1f))
-                            transport()
-                            Spacer(Modifier.weight(1f))
-                            options()
+                        Box(Modifier.fillMaxWidth()) {
+                            Box(Modifier.align(Alignment.CenterStart)) {
+                                PillIcon(Icons.Filled.Lock, "Lock") { locked = true; showControls = true; interaction++ }
+                            }
+                            Box(Modifier.align(Alignment.Center)) { transport() }
+                            Box(Modifier.align(Alignment.CenterEnd)) { options() }
                         }
                     }
                 }

@@ -11,8 +11,8 @@ android {
         applicationId = "com.falah.cascade"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
     }
 
     // Fixed signing key so every future build installs as an update over the previous one
